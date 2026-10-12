@@ -76,3 +76,49 @@ func TestEnsureMoreTagLongUnbrokenContent(t *testing.T) {
 		t.Errorf("no marker inserted for unbroken long content")
 	}
 }
+
+func TestEnsureMoreTagSkipsCodeFences(t *testing.T) {
+	// Prose up to just under the threshold, then one huge fenced block
+	// covering the whole search window: the marker must land on a prose
+	// boundary before the fence, never inside it.
+	var b strings.Builder
+	for utf8.RuneCountInString(b.String()) < moreTagThreshold-10 {
+		b.WriteString("正文段落内容。\n\n")
+	}
+	prose := b.String()
+	in := prose + "```go\n" + strings.Repeat("x\n", moreTagSearchWindow) + "```\n\n尾声段落。\n\n" + repeatParagraph(100)
+
+	got := ensureMoreTag(in)
+	idx := strings.Index(got, "<!--more-->")
+	if idx == -1 {
+		t.Fatalf("no marker inserted")
+	}
+	// The marker must sit after the fenced block closes, never inside it.
+	if lastFence := strings.LastIndex(got, "```"); lastFence > idx {
+		t.Errorf("marker at %d inside fenced block (last fence at %d)", idx, lastFence)
+	}
+	// And the prose above the marker is preserved.
+	if !strings.HasPrefix(got, prose[:len(prose)-1]) {
+		t.Errorf("prose mangled before marker")
+	}
+}
+
+func TestEnsureMoreTagBoundaryAfterFencedBlock(t *testing.T) {
+	// A fence straddling the threshold: the marker waits for the next
+	// prose boundary after the fence closes.
+	var b strings.Builder
+	for utf8.RuneCountInString(b.String()) < moreTagThreshold-10 {
+		b.WriteString("前置正文。\n\n")
+	}
+	in := b.String() + "```\ncode line\ncode line\n```\n\n围栏之后的段落。\n\n" + repeatParagraph(100)
+
+	got := ensureMoreTag(in)
+	idx := strings.Index(got, "<!--more-->")
+	if idx == -1 {
+		t.Fatalf("no marker inserted")
+	}
+	// The marker must wait until the fence closes.
+	if lastFence := strings.LastIndex(got, "```"); lastFence > idx {
+		t.Errorf("marker at %d inside fenced block (last fence at %d)", idx, lastFence)
+	}
+}

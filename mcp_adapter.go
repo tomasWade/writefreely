@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/writeas/impart"
-	"github.com/writeas/web-core/log"
 	wfmcp "github.com/writefreely/writefreely/mcp"
 )
 
@@ -84,6 +83,9 @@ const moreTagSearchWindow = 2000
 // ensureMoreTag returns content with a <!--more--> excerpt marker if the
 // content is long and doesn't already carry one. The marker is placed on a
 // paragraph boundary shortly after the threshold so listings stay light.
+// Boundaries inside fenced code blocks (``` / ~~~) are skipped so the
+// marker never lands inside — and renders as visible text in — a code
+// block.
 func ensureMoreTag(content string) string {
 	if strings.Contains(content, shortCodeMore) {
 		return content
@@ -92,19 +94,50 @@ func ensureMoreTag(content string) string {
 	if len(runes) <= moreTagThreshold {
 		return content
 	}
-	for i := moreTagThreshold; i < len(runes) && i < moreTagThreshold+moreTagSearchWindow; i++ {
-		if runes[i] == '\n' && i+1 < len(runes) && runes[i+1] == '\n' {
-			return string(runes[:i]) + "\n\n<!--more-->\n\n" + string(runes[i+2:])
+
+	// Collect paragraph boundaries (the first '\n' of a "\n\n" pair) that
+	// lie outside code fences, along with their rune offsets.
+	type boundary struct{ at int }
+	var boundaries []boundary
+	inFence := false
+	lineStart := 0 // rune offset of the current line
+	for i := 0; i < len(runes); i++ {
+		if runes[i] != '\n' {
+			continue
+		}
+		line := strings.TrimSpace(string(runes[lineStart:i]))
+		if strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~") {
+			inFence = !inFence
+		}
+		// A boundary needs this line empty and the next line non-empty;
+		// i points at the '\n' ending an empty line when the previous
+		// character was also a newline.
+		if !inFence && lineStart == i && i > 0 && runes[i-1] == '\n' && i+1 < len(runes) && runes[i+1] != '\n' {
+			boundaries = append(boundaries, boundary{at: i - 1})
+		}
+		lineStart = i + 1
+	}
+
+	// Prefer a boundary shortly after the threshold...
+	for _, b := range boundaries {
+		if b.at >= moreTagThreshold && b.at < moreTagThreshold+moreTagSearchWindow {
+			return string(runes[:b.at]) + "\n\n<!--more-->\n\n" + string(runes[b.at+2:])
 		}
 	}
-	// No paragraph break found nearby; insert at the first one anywhere,
-	// or fall back to the window end.
-	for i := moreTagThreshold + moreTagSearchWindow; i < len(runes); i++ {
-		if runes[i] == '\n' && i+1 < len(runes) && runes[i+1] == '\n' {
-			return string(runes[:i]) + "\n\n<!--more-->\n\n" + string(runes[i+2:])
+	// ...else the first boundary anywhere past the threshold...
+	for _, b := range boundaries {
+		if b.at >= moreTagThreshold {
+			return string(runes[:b.at]) + "\n\n<!--more-->\n\n" + string(runes[b.at+2:])
 		}
 	}
-	return string(runes[:moreTagThreshold+moreTagSearchWindow]) + "\n\n<!--more-->\n\n" + string(runes[moreTagThreshold+moreTagSearchWindow:])
+	// ...else force one at the window end. Fence-unfriendly content shapes
+	// may render the marker as text, but extremely long unbroken prose is
+	// pathological anyway.
+	at := moreTagThreshold + moreTagSearchWindow
+	if at >= len(runes) {
+		at = len(runes)
+	}
+	return string(runes[:at]) + "\n\n<!--more-->\n\n" + string(runes[at:])
 }
 
 func (s *wfMCPStore) CreatePost(userID int64, title, content, collAlias string) (wfmcp.PostRef, error) {
@@ -128,6 +161,7 @@ func (s *wfMCPStore) CreatePost(userID int64, title, content, collAlias string) 
 	// Mirror the async side effects of the HTTP newPost handler so MCP
 	// posts behave identically on federating/email-enabled instances.
 	pubPost := &PublicPost{Post: p}
+	pubPost.extractData() // hashtags must be present before federating
 	coll.ForPublic()
 	pubPost.Collection = &CollectionObj{Collection: *coll}
 	if !s.app.cfg.App.Private && s.app.cfg.App.Federation && !pubPost.Created.After(time.Now()) {
@@ -153,6 +187,12 @@ func (s *wfMCPStore) CreatePost(userID int64, title, content, collAlias string) 
 }
 
 func (s *wfMCPStore) UpdatePost(userID int64, postID string, title, content *string) error {
+	// Mirror the HTTP existingPost handler's silenced-user rejection.
+	silenced, err := s.app.db.IsUserSilenced(userID)
+	if err == nil && silenced {
+		return ErrUserSilenced
+	}
+
 	if content != nil {
 		c := ensureMoreTag(*content)
 		content = &c
@@ -169,6 +209,7 @@ func (s *wfMCPStore) UpdatePost(userID int64, postID string, title, content *str
 	if err != nil {
 		return nil // update succeeded; dispatch failures are non-fatal
 	}
+	pRes.extractData()
 	if pRes.CollectionID.Valid && !s.app.cfg.App.Private && s.app.cfg.App.Federation {
 		coll, err := s.app.db.GetCollectionBy("id = ?", pRes.CollectionID.Int64)
 		if err == nil {
@@ -178,22 +219,6 @@ func (s *wfMCPStore) UpdatePost(userID int64, postID string, title, content *str
 		}
 	}
 	return nil
-}
-
-// DeleteOwnedPost deletes a post owned by the given user. It reports
-// whether a row was actually removed; false means the post doesn't exist
-// or belongs to another user. Federation cleanup stays with the caller.
-func (db *datastore) DeleteOwnedPost(id string, ownerID int64) (bool, error) {
-	res, err := db.Exec("DELETE FROM posts WHERE id = ? AND owner_id = ?", id, ownerID)
-	if err != nil {
-		log.Error("Unable to delete owned post: %v", err)
-		return false, err
-	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	return affected > 0, nil
 }
 
 func (s *wfMCPStore) DeletePost(userID int64, postID string) error {
@@ -235,8 +260,11 @@ func (s *wfMCPStore) postRef(pp *PublicPost) wfmcp.PostRef {
 		Updated: pp.Updated,
 	}
 	if pp.Collection != nil && pp.Collection.Alias != "" {
+		// Reuse the canonical URL logic so single-user instances (where
+		// posts live at host/<slug>) get correct links too.
+		pp.Collection.hostName = s.app.cfg.App.Host
 		ref.CollectionAlias = pp.Collection.Alias
-		ref.URL = s.app.cfg.App.Host + "/" + pp.Collection.Alias + "/" + pp.Slug.String
+		ref.URL = pp.Collection.CanonicalURL() + pp.Slug.String
 	} else {
 		ref.URL = s.app.cfg.App.Host + "/" + pp.ID + ".md"
 	}

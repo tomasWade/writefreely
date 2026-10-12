@@ -2505,6 +2505,22 @@ func (db *datastore) GetCollectionRedirect(alias string) (new string) {
 	return
 }
 
+// DeleteOwnedPost deletes a post owned by the given user. It reports
+// whether a row was actually removed; false means the post doesn't exist
+// or belongs to another user. Federation cleanup stays with the caller.
+func (db *datastore) DeleteOwnedPost(id string, ownerID int64) (bool, error) {
+	res, err := db.Exec("DELETE FROM posts WHERE id = ? AND owner_id = ?", id, ownerID)
+	if err != nil {
+		log.Error("Unable to delete owned post: %v", err)
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
 func (db *datastore) DeleteCollection(alias string, userID int64) error {
 	c := &Collection{Alias: alias}
 	var username string

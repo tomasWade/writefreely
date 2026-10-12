@@ -126,10 +126,12 @@ func handleListMyPosts(store Store) func(context.Context, mcp.CallToolRequest) (
 		}
 		limit := defaultListLimit
 		if v, ok := req.GetArguments()["limit"].(float64); ok && v > 0 {
+			// Clamp on the float before converting: absurd values would
+			// wrap to a negative int and bypass the limit entirely.
+			if v > float64(maxListLimit) {
+				v = float64(maxListLimit)
+			}
 			limit = int(v)
-		}
-		if limit > maxListLimit {
-			limit = maxListLimit
 		}
 		includeContent := false
 		if v, ok := req.GetArguments()["include_content"].(bool); ok {
