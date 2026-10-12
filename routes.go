@@ -21,6 +21,7 @@ import (
 	"github.com/writeas/go-webfinger"
 	"github.com/writeas/web-core/log"
 	"github.com/writefreely/go-nodeinfo"
+	wfmcp "github.com/writefreely/writefreely/mcp"
 )
 
 // InitStaticRoutes adds routes for serving static files.
@@ -124,6 +125,10 @@ func InitRoutes(apper Apper, r *mux.Router) *mux.Router {
 
 	// Sign up validation
 	write.HandleFunc("/api/alias", handler.All(handleUsernameCheck)).Methods("POST")
+
+	// MCP (Model Context Protocol) endpoint for AI agents, authenticated
+	// with the same access tokens as the regular API.
+	write.Path(wfmcp.EndpointPath).Handler(wfmcp.NewHandler(NewMCPStoreFromApp(apper.App())))
 
 	write.HandleFunc("/api/markdown", handler.All(handleRenderMarkdown)).Methods("POST")
 

@@ -1,0 +1,45 @@
+# WriteFreely with built-in MCP server (fork: tomasWade/writefreely, branch mcp).
+# Based on the upstream Dockerfile.prod, with:
+#   - pinned Go/Alpine versions
+#   - China-friendly Go/npm proxies for builds behind the GFW
+FROM golang:1.25-alpine3.22 AS build
+
+LABEL org.opencontainers.image.source="https://github.com/tomasWade/writefreely"
+LABEL org.opencontainers.image.description="WriteFreely with a built-in MCP server (Model Context Protocol) for AI agents, over Streamable HTTP at /api/mcp."
+
+RUN apk add --no-cache nodejs npm make build-base git sqlite-dev patch && \
+    npm config set registry https://registry.npmmirror.com && \
+    npm install -g less less-plugin-clean-css && \
+    mkdir -p /go/src/github.com/writefreely/writefreely
+
+COPY . /go/src/github.com/writefreely/writefreely
+WORKDIR /go/src/github.com/writefreely/writefreely
+
+ENV NODE_OPTIONS=--openssl-legacy-provider
+ENV GOPROXY=https://goproxy.cn,direct
+ENV GOFLAGS=-buildvcs=false
+
+RUN cat ossl_legacy.cnf >> /etc/ssl/openssl.cnf && \
+    make build && \
+    make ui
+
+FROM alpine:3.22
+
+RUN apk add --no-cache openssl ca-certificates && \
+    mkdir /usr/share/writefreely
+
+COPY --from=build /go/src/github.com/writefreely/writefreely/cmd/writefreely/writefreely /usr/bin
+COPY --from=build /go/src/github.com/writefreely/writefreely/pages /usr/share/writefreely/pages
+COPY --from=build /go/src/github.com/writefreely/writefreely/static /usr/share/writefreely/static
+COPY --from=build /go/src/github.com/writefreely/writefreely/templates /usr/share/writefreely/templates
+
+ENV WRITEFREELY_DOCKER=True
+ENV HOME=/data
+WORKDIR /data
+VOLUME /data
+EXPOSE 8080
+
+HEALTHCHECK --start-period=5s --interval=30s --timeout=5s \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/ || exit 1
+
+ENTRYPOINT ["/usr/bin/writefreely"]

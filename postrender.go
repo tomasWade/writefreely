@@ -74,6 +74,17 @@ func (p *Post) handlePremiumContent(c *Collection, isOwner, postPage bool, cfg *
 	}
 }
 
+// truncateAtMore returns content cut at the <!--more--> excerpt marker for
+// listing contexts (collection landing, Reader timeline, tag pages), where
+// processing or rendering the full body would dominate latency. The marker
+// itself is dropped; full content remains available on the post's own page.
+func truncateAtMore(content string) string {
+	if exc := strings.Index(content, shortCodeMore); exc > -1 {
+		return strings.TrimSpace(content[:exc])
+	}
+	return content
+}
+
 func (p *Post) formatContent(cfg *config.Config, c *Collection, isOwner bool, isPostPage bool) {
 	baseURL := c.CanonicalURL()
 	// TODO: redundant
@@ -85,9 +96,17 @@ func (p *Post) formatContent(cfg *config.Config, c *Collection, isOwner bool, is
 	p.Content = strings.Replace(p.Content, "&lt;!--paid-->", "<!--paid-->", 1)
 
 	p.HTMLTitle = template.HTML(applyBasicMarkdown([]byte(p.Title.String)))
-	p.HTMLContent = template.HTML(applyMarkdown([]byte(p.Content), baseURL, cfg))
-	if exc := strings.Index(string(p.Content), "<!--more-->"); exc > -1 {
+	if exc := strings.Index(string(p.Content), shortCodeMore); exc > -1 && !isPostPage {
+		// Listing view (collection landing, Reader, feeds): render only the
+		// excerpt so long posts don't dominate page render time. Templates
+		// show the excerpt with a "Read more..." link to the full post.
 		p.HTMLExcerpt = template.HTML(applyMarkdown([]byte(p.Content[:exc]), baseURL, cfg))
+		p.HTMLContent = p.HTMLExcerpt
+	} else {
+		p.HTMLContent = template.HTML(applyMarkdown([]byte(p.Content), baseURL, cfg))
+		if exc := strings.Index(string(p.Content), shortCodeMore); exc > -1 {
+			p.HTMLExcerpt = template.HTML(applyMarkdown([]byte(p.Content[:exc]), baseURL, cfg))
+		}
 	}
 }
 

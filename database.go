@@ -1360,6 +1360,7 @@ func (db *datastore) GetPosts(cfg *config.Config, c *Collection, page int, inclu
 			log.Error("Failed scanning row: %v", err)
 			break
 		}
+		p.Content = truncateAtMore(p.Content)
 		p.extractData()
 		p.augmentContent(c)
 		p.formatContent(cfg, c, includeFuture, false)
@@ -1484,6 +1485,7 @@ func (db *datastore) GetPostsTagged(cfg *config.Config, c *Collection, tag strin
 			log.Error("Failed scanning row: %v", err)
 			break
 		}
+		p.Content = truncateAtMore(p.Content)
 		p.extractData()
 		p.augmentContent(c)
 		p.formatContent(cfg, c, includeFuture, false)
@@ -1552,6 +1554,7 @@ ORDER BY created `+order+limitStr, collID, lang)
 			log.Error("Failed scanning row: %v", err)
 			break
 		}
+		p.Content = truncateAtMore(p.Content)
 		p.extractData()
 		p.augmentContent(c)
 		p.formatContent(cfg, c, includeFuture, false)

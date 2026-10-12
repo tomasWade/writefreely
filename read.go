@@ -115,6 +115,7 @@ func (app *App) FetchPublicPosts() (interface{}, error) {
 			c.Monetization = app.db.GetCollectionAttribute(c.ID, "monetization_pointer")
 		}
 
+		p.Content = truncateAtMore(p.Content)
 		p.extractData()
 		p.handlePremiumContent(c, false, false, app.cfg)
 		p.HTMLContent = template.HTML(applyMarkdown([]byte(p.Content), "", app.cfg))
