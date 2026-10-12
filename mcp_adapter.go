@@ -13,6 +13,7 @@ package writefreely
 import (
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/writeas/impart"
 	"github.com/writeas/web-core/log"
@@ -20,37 +21,31 @@ import (
 )
 
 // wfMCPStore adapts the WriteFreely datastore to the mcp.Store interface.
+// It holds the App so publish side effects (federation, email jobs) match
+// the HTTP handlers in posts.go.
 type wfMCPStore struct {
-	db       *datastore
-	hostName string
-}
-
-// NewMCPStore returns an mcp.Store backed by the given datastore. hostName
-// is the configured site host (e.g. http://localhost:18080) used to build
-// canonical URLs.
-func NewMCPStore(db *datastore, hostName string) wfmcp.Store {
-	return &wfMCPStore{db: db, hostName: strings.TrimSuffix(hostName, "/")}
+	app *App
 }
 
 // NewMCPStoreFromApp returns an mcp.Store for the given App.
 func NewMCPStoreFromApp(app *App) wfmcp.Store {
-	return NewMCPStore(app.db, app.cfg.App.Host)
+	return &wfMCPStore{app: app}
 }
 
 func (s *wfMCPStore) GetUserID(accessToken string) int64 {
-	return s.db.GetUserID(accessToken)
+	return s.app.db.GetUserID(accessToken)
 }
 
 // resolveCollection finds the collection a post should be published into:
 // the one named by alias, or the user's primary collection when alias is
 // empty (the auto-created one sharing their username, else the first).
 func (s *wfMCPStore) resolveCollection(userID int64, alias string) (*Collection, error) {
-	u, err := s.db.GetUserByID(userID)
+	u, err := s.app.db.GetUserByID(userID)
 	if err != nil {
 		return nil, err
 	}
 	if alias == "" {
-		colls, err := s.db.GetCollections(u, s.hostName)
+		colls, err := s.app.db.GetCollections(u, s.app.cfg.App.Host)
 		if err != nil {
 			return nil, err
 		}
@@ -65,14 +60,14 @@ func (s *wfMCPStore) resolveCollection(userID int64, alias string) (*Collection,
 		return nil, impart.HTTPError{http.StatusNotFound, "You have no collection to publish to."}
 	}
 
-	coll, err := s.db.GetCollection(alias)
+	coll, err := s.app.db.GetCollection(alias)
 	if err != nil {
 		return nil, err
 	}
 	if coll.OwnerID != userID {
 		return nil, ErrForbiddenCollection
 	}
-	coll.hostName = s.hostName
+	coll.hostName = s.app.cfg.App.Host
 	return coll, nil
 }
 
@@ -90,7 +85,7 @@ const moreTagSearchWindow = 2000
 // content is long and doesn't already carry one. The marker is placed on a
 // paragraph boundary shortly after the threshold so listings stay light.
 func ensureMoreTag(content string) string {
-	if strings.Contains(content, "<!--more-->") {
+	if strings.Contains(content, shortCodeMore) {
 		return content
 	}
 	runes := []rune(content)
@@ -113,7 +108,8 @@ func ensureMoreTag(content string) string {
 }
 
 func (s *wfMCPStore) CreatePost(userID int64, title, content, collAlias string) (wfmcp.PostRef, error) {
-	silenced, err := s.db.IsUserSilenced(userID)
+	db := s.app.db
+	silenced, err := db.IsUserSilenced(userID)
 	if err == nil && silenced {
 		return wfmcp.PostRef{}, ErrUserSilenced
 	}
@@ -124,9 +120,25 @@ func (s *wfMCPStore) CreatePost(userID int64, title, content, collAlias string) 
 	}
 
 	content = ensureMoreTag(content)
-	p, err := s.db.CreatePost(userID, coll.ID, &SubmittedPost{Title: &title, Content: &content})
+	p, err := db.CreatePost(userID, coll.ID, &SubmittedPost{Title: &title, Content: &content})
 	if err != nil {
 		return wfmcp.PostRef{}, err
+	}
+
+	// Mirror the async side effects of the HTTP newPost handler so MCP
+	// posts behave identically on federating/email-enabled instances.
+	pubPost := &PublicPost{Post: p}
+	coll.ForPublic()
+	pubPost.Collection = &CollectionObj{Collection: *coll}
+	if !s.app.cfg.App.Private && s.app.cfg.App.Federation && !pubPost.Created.After(time.Now()) {
+		go federatePost(s.app, pubPost, coll.ID, false)
+	}
+	if s.app.cfg.Email.Enabled() && coll.EmailSubsEnabled() {
+		go db.InsertJob(&PostJob{
+			PostID: p.ID,
+			Action: "email",
+			Delay:  emailSendDelay,
+		})
 	}
 
 	return wfmcp.PostRef{
@@ -145,16 +157,32 @@ func (s *wfMCPStore) UpdatePost(userID int64, postID string, title, content *str
 		c := ensureMoreTag(*content)
 		content = &c
 	}
-	return s.db.UpdateOwnedPost(&AuthenticatedPost{
+	if err := s.app.db.UpdateOwnedPost(&AuthenticatedPost{
 		ID:            postID,
 		SubmittedPost: &SubmittedPost{Title: title, Content: content},
-	}, userID)
+	}, userID); err != nil {
+		return err
+	}
+
+	// Mirror the HTTP existingPost handler: federate the update.
+	pRes, err := s.app.db.GetPost(postID, 0)
+	if err != nil {
+		return nil // update succeeded; dispatch failures are non-fatal
+	}
+	if pRes.CollectionID.Valid && !s.app.cfg.App.Private && s.app.cfg.App.Federation {
+		coll, err := s.app.db.GetCollectionBy("id = ?", pRes.CollectionID.Int64)
+		if err == nil {
+			coll.hostName = s.app.cfg.App.Host
+			pRes.Collection = &CollectionObj{Collection: *coll}
+			go federatePost(s.app, pRes, pRes.Collection.ID, true)
+		}
+	}
+	return nil
 }
 
 // DeleteOwnedPost deletes a post owned by the given user. It reports
 // whether a row was actually removed; false means the post doesn't exist
-// or belongs to another user. This is the non-federating counterpart used
-// by the MCP tools; the HTTP handler in posts.go keeps its richer logic.
+// or belongs to another user. Federation cleanup stays with the caller.
 func (db *datastore) DeleteOwnedPost(id string, ownerID int64) (bool, error) {
 	res, err := db.Exec("DELETE FROM posts WHERE id = ? AND owner_id = ?", id, ownerID)
 	if err != nil {
@@ -169,12 +197,28 @@ func (db *datastore) DeleteOwnedPost(id string, ownerID int64) (bool, error) {
 }
 
 func (s *wfMCPStore) DeletePost(userID int64, postID string) error {
-	deleted, err := s.db.DeleteOwnedPost(postID, userID)
+	// Fetch first (also validates ownership) so federation cleanup can
+	// reference the post, mirroring the HTTP deletePost handler.
+	pp, err := s.app.db.GetOwnedPost(postID, userID)
+	if err != nil {
+		return err
+	}
+	collID := pp.CollectionID
+
+	deleted, err := s.app.db.DeleteOwnedPost(postID, userID)
 	if err != nil {
 		return err
 	}
 	if !deleted {
 		return impart.HTTPError{http.StatusForbidden, "Post not found, or you're not the owner."}
+	}
+
+	if collID.Valid && !s.app.cfg.App.Private && s.app.cfg.App.Federation {
+		coll, err := s.app.db.GetCollectionByID(collID.Int64)
+		if err == nil {
+			pp.Collection = &CollectionObj{Collection: *coll}
+			go deleteFederatedPost(s.app, pp, collID.Int64)
+		}
 	}
 	return nil
 }
@@ -192,20 +236,20 @@ func (s *wfMCPStore) postRef(pp *PublicPost) wfmcp.PostRef {
 	}
 	if pp.Collection != nil && pp.Collection.Alias != "" {
 		ref.CollectionAlias = pp.Collection.Alias
-		ref.URL = s.hostName + "/" + pp.Collection.Alias + "/" + pp.Slug.String
+		ref.URL = s.app.cfg.App.Host + "/" + pp.Collection.Alias + "/" + pp.Slug.String
 	} else {
-		ref.URL = s.hostName + "/" + pp.ID + ".md"
+		ref.URL = s.app.cfg.App.Host + "/" + pp.ID + ".md"
 	}
 	return ref
 }
 
 func (s *wfMCPStore) GetPost(userID int64, postID string) (wfmcp.PostRef, error) {
-	pp, err := s.db.GetOwnedPost(postID, userID)
+	pp, err := s.app.db.GetOwnedPost(postID, userID)
 	if err != nil {
 		return wfmcp.PostRef{}, err
 	}
 	if pp.CollectionID.Valid {
-		coll, err := s.db.GetCollectionByID(pp.CollectionID.Int64)
+		coll, err := s.app.db.GetCollectionByID(pp.CollectionID.Int64)
 		if err == nil && coll.OwnerID == userID {
 			pp.Collection = &CollectionObj{Collection: *coll}
 		}
@@ -213,25 +257,25 @@ func (s *wfMCPStore) GetPost(userID int64, postID string) (wfmcp.PostRef, error)
 	return s.postRef(pp), nil
 }
 
-func (s *wfMCPStore) ListPosts(userID int64, limit int, includeContent bool) ([]wfmcp.PostRef, error) {
-	u, err := s.db.GetUserByID(userID)
+func (s *wfMCPStore) ListPosts(userID int64, collAlias string, limit int, includeContent bool) ([]wfmcp.PostRef, error) {
+	u, err := s.app.db.GetUserByID(userID)
 	if err != nil {
 		return nil, err
 	}
-	posts, err := s.db.GetUserPosts(u)
+	posts, err := s.app.db.GetUserPosts(u)
 	if err != nil {
 		return nil, err
 	}
 
 	refs := make([]wfmcp.PostRef, 0, len(*posts))
-	// GetUserPosts returns oldest first; MCP consumers want newest first.
+	// GetUserPosts returns oldest first, with each post's owning collection
+	// already joined in. MCP consumers want newest first; the collection
+	// filter runs before the limit so small collections aren't starved by
+	// newer posts elsewhere.
 	for i := len(*posts) - 1; i >= 0; i-- {
 		pp := (*posts)[i]
-		if pp.CollectionID.Valid {
-			coll, err := s.db.GetCollectionByID(pp.CollectionID.Int64)
-			if err == nil {
-				pp.Collection = &CollectionObj{Collection: *coll}
-			}
+		if collAlias != "" && (pp.Collection == nil || pp.Collection.Alias != collAlias) {
+			continue
 		}
 		ref := s.postRef(&pp)
 		if !includeContent {
@@ -246,11 +290,11 @@ func (s *wfMCPStore) ListPosts(userID int64, limit int, includeContent bool) ([]
 }
 
 func (s *wfMCPStore) ListCollections(userID int64) ([]wfmcp.CollRef, error) {
-	u, err := s.db.GetUserByID(userID)
+	u, err := s.app.db.GetUserByID(userID)
 	if err != nil {
 		return nil, err
 	}
-	colls, err := s.db.GetCollections(u, s.hostName)
+	colls, err := s.app.db.GetCollections(u, s.app.cfg.App.Host)
 	if err != nil {
 		return nil, err
 	}

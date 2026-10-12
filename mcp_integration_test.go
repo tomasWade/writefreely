@@ -19,6 +19,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/client/transport"
@@ -83,10 +84,12 @@ func newMCPServerHarness(t *testing.T) *mcpTestHarness {
 	ds := newSQLiteDatastore(t)
 	cfg := config.New()
 	cfg.App.Host = "http://test.host"
+	cfg.App.Federation = false // matches deploy config; the App below is minimal
+	cfg.App.MaxBlogs = 2       // the collection-filter test needs a second blog
 	cfg.Database.Type = driverSQLite
 
 	h := &mcpTestHarness{t: t, ds: ds, cfg: cfg}
-	h.srv = httptest.NewServer(wfmcp.NewHandler(NewMCPStore(ds, cfg.App.Host)))
+	h.srv = httptest.NewServer(wfmcp.NewHandler(NewMCPStoreFromApp(&App{db: ds, cfg: cfg})))
 	t.Cleanup(h.srv.Close)
 
 	h.userID, h.token = h.createUser("opencode")
@@ -254,6 +257,88 @@ func TestMCPIntegrationBadToken(t *testing.T) {
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("want 401 for unknown token, got %d", resp.StatusCode)
 	}
+}
+
+// TestMCPIntegrationCollectionFilterBeforeLimit guards the list_my_posts
+// collection filter: filtering must happen before the limit is applied, so
+// asking for a quiet collection still returns its posts even when newer
+// posts exist elsewhere.
+func TestMCPIntegrationCollectionFilterBeforeLimit(t *testing.T) {
+	h := newMCPServerHarness(t)
+	c := h.clientFor(h.token)
+
+	// A quiet second collection with one post...
+	if _, err := h.ds.CreateCollection(h.cfg, "notes", "", h.userID); err != nil {
+		t.Fatalf("CreateCollection: %v", err)
+	}
+	h.call(c, "publish_post", map[string]any{"content": "quiet note", "collection": "notes"})
+
+	// ...buried under several newer posts in the primary collection.
+	for i := 0; i < 3; i++ {
+		h.call(c, "publish_post", map[string]any{"content": "main stream post"})
+	}
+
+	res := h.call(c, "list_my_posts", map[string]any{"collection": "notes"})
+	text := h.text(res)
+	if !strings.Contains(text, "collection: notes") || !strings.Contains(text, "quiet-note") {
+		t.Fatalf("collection filter applied after limit; got:\n%s", text)
+	}
+	if strings.Contains(text, "main-stream") {
+		t.Fatalf("collection filter leaked other collections:\n%s", text)
+	}
+}
+
+// TestGetPostsFullVsListing pins the data-layer contract: GetPosts keeps
+// full content for API/export/ActivityPub consumers, while
+// GetPostsForListing truncates at the <!--more--> marker and sets
+// HTMLExcerpt so templates link to the full post.
+func TestGetPostsFullVsListing(t *testing.T) {
+	h := newMCPServerHarness(t)
+
+	full := "intro paragraph\n\n<!--more-->\n\nthe rest of the story"
+	if _, err := h.ds.CreatePost(h.userID, h.coll(t).ID, &SubmittedPost{
+		Title: &[]string{"marked"}[0], Content: &full,
+	}); err != nil {
+		t.Fatalf("CreatePost: %v", err)
+	}
+
+	time.Sleep(1100 * time.Millisecond) // created vs now() string compare is second-granular
+
+	posts, err := h.ds.GetPosts(h.cfg, h.coll(t), 0, false, false, false, "")
+	if err != nil {
+		t.Fatalf("GetPosts: %v", err)
+	}
+	if len(*posts) != 1 || !strings.Contains((*posts)[0].Content, "the rest of the story") {
+		t.Fatalf("GetPosts must return full content, got %d posts", len(*posts))
+	}
+
+	listing, err := h.ds.GetPostsForListing(h.cfg, h.coll(t), 0, false, false, false, "")
+	if err != nil {
+		t.Fatalf("GetPostsForListing: %v", err)
+	}
+	if len(*listing) != 1 {
+		t.Fatalf("GetPostsForListing: %d posts", len(*listing))
+	}
+	lp := (*listing)[0]
+	if strings.Contains(lp.Content, "the rest of the story") {
+		t.Fatalf("listing variant must truncate at the marker:\n%s", lp.Content)
+	}
+	if !strings.Contains(lp.Content, "intro paragraph") {
+		t.Fatalf("listing variant lost the excerpt:\n%s", lp.Content)
+	}
+	if lp.HTMLExcerpt == "" {
+		t.Fatalf("listing variant must set HTMLExcerpt for the Read more link")
+	}
+}
+
+func (h *mcpTestHarness) coll(t *testing.T) *Collection {
+	h.t.Helper()
+	coll, err := h.ds.GetCollection("opencode")
+	if err != nil {
+		t.Fatalf("GetCollection: %v", err)
+	}
+	coll.hostName = h.cfg.App.Host
+	return coll
 }
 
 // field extracts "key: value" from a tool result text body.

@@ -137,18 +137,9 @@ func handleListMyPosts(store Store) func(context.Context, mcp.CallToolRequest) (
 		}
 		collection := req.GetString("collection", "")
 
-		posts, err := store.ListPosts(userID, limit, includeContent)
+		posts, err := store.ListPosts(userID, collection, limit, includeContent)
 		if err != nil {
 			return errResult(err), nil
-		}
-		if collection != "" {
-			filtered := posts[:0]
-			for _, p := range posts {
-				if p.CollectionAlias == collection {
-					filtered = append(filtered, p)
-				}
-			}
-			posts = filtered
 		}
 		if len(posts) == 0 {
 			return mcp.NewToolResultText("no posts"), nil

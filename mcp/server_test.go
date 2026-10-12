@@ -101,17 +101,21 @@ func (f *fakeStore) GetPost(userID int64, postID string) (PostRef, error) {
 	return p, nil
 }
 
-func (f *fakeStore) ListPosts(userID int64, limit int, includeContent bool) ([]PostRef, error) {
+func (f *fakeStore) ListPosts(userID int64, collAlias string, limit int, includeContent bool) ([]PostRef, error) {
 	f.gotUserID = userID
 	refs := make([]PostRef, 0, len(f.posts))
-	for _, p := range f.posts {
+	for id, p := range f.posts {
+		if collAlias != "" && p.CollectionAlias != collAlias {
+			continue
+		}
 		if !includeContent {
 			p.Content = ""
 		}
+		p.ID = id
 		refs = append(refs, p)
-	}
-	if limit > 0 && len(refs) > limit {
-		refs = refs[:limit]
+		if limit > 0 && len(refs) >= limit {
+			break
+		}
 	}
 	return refs, nil
 }

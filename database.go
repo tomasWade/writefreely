@@ -120,8 +120,10 @@ type writestore interface {
 	GetPostLikeCounts(postID string) (int64, error)
 	GetPostsCount(c *CollectionObj, includeFuture bool) error
 	GetPosts(cfg *config.Config, c *Collection, page int, includeFuture, forceRecentFirst, includePinned bool, contentType PostType) (*[]PublicPost, error)
+	GetPostsForListing(cfg *config.Config, c *Collection, page int, includeFuture, forceRecentFirst, includePinned bool, contentType PostType) (*[]PublicPost, error)
 	GetAllPostsTaggedIDs(c *Collection, tag string, includeFuture bool) ([]string, error)
 	GetPostsTagged(cfg *config.Config, c *Collection, tag string, page int, includeFuture bool) (*[]PublicPost, error)
+	GetPostsTaggedForListing(cfg *config.Config, c *Collection, tag string, page int, includeFuture bool) (*[]PublicPost, error)
 
 	GetAPFollowers(c *Collection) (*[]RemoteUser, error)
 	GetAPActorKeys(collectionID int64) ([]byte, []byte)
@@ -1313,6 +1315,21 @@ func (db *datastore) GetPostsCount(c *CollectionObj, includeFuture bool) error {
 // It will include only standard (non-pinned) posts unless `includePinned` is true.
 // TODO: change includeFuture to isOwner, since that's how it's used
 func (db *datastore) GetPosts(cfg *config.Config, c *Collection, page int, includeFuture, forceRecentFirst, includePinned bool, contentType PostType) (*[]PublicPost, error) {
+	return db.getPosts(cfg, c, page, includeFuture, forceRecentFirst, includePinned, contentType, false)
+}
+
+// GetPostsForListing is GetPosts for web listing surfaces (collection
+// landing, archive pages): the query is identical, but each post carrying a
+// <!--more--> excerpt marker is truncated there before tag extraction and
+// rendering, so very long posts don't dominate page latency. HTMLExcerpt
+// mirrors the truncated render so listing templates show the excerpt with a
+// "Read more..." link. Full-content consumers (public API, data export,
+// ActivityPub, gopher) must use GetPosts.
+func (db *datastore) GetPostsForListing(cfg *config.Config, c *Collection, page int, includeFuture, forceRecentFirst, includePinned bool, contentType PostType) (*[]PublicPost, error) {
+	return db.getPosts(cfg, c, page, includeFuture, forceRecentFirst, includePinned, contentType, true)
+}
+
+func (db *datastore) getPosts(cfg *config.Config, c *Collection, page int, includeFuture, forceRecentFirst, includePinned bool, contentType PostType, forListing bool) (*[]PublicPost, error) {
 	collID := c.ID
 
 	cf := c.NewFormat()
@@ -1360,10 +1377,16 @@ func (db *datastore) GetPosts(cfg *config.Config, c *Collection, page int, inclu
 			log.Error("Failed scanning row: %v", err)
 			break
 		}
-		p.Content = truncateAtMore(p.Content)
+		wasTruncated := forListing && strings.Contains(p.Content, shortCodeMore)
+		if wasTruncated {
+			p.Content = truncateAtMore(p.Content)
+		}
 		p.extractData()
 		p.augmentContent(c)
 		p.formatContent(cfg, c, includeFuture, false)
+		if wasTruncated {
+			p.HTMLExcerpt = p.HTMLContent
+		}
 
 		pubPost := p.processPost()
 		if contentType == postArch {
@@ -1431,6 +1454,17 @@ func (db *datastore) GetAllPostsTaggedIDs(c *Collection, tag string, includeFutu
 // It will return future posts if `includeFuture` is true.
 // TODO: change includeFuture to isOwner, since that's how it's used
 func (db *datastore) GetPostsTagged(cfg *config.Config, c *Collection, tag string, page int, includeFuture bool) (*[]PublicPost, error) {
+	return db.getPostsTagged(cfg, c, tag, page, includeFuture, false)
+}
+
+// GetPostsTaggedForListing is GetPostsTagged for web listing surfaces (tag
+// pages): posts carrying a <!--more--> marker are truncated at it, like
+// GetPostsForListing. Feed consumers keep using GetPostsTagged.
+func (db *datastore) GetPostsTaggedForListing(cfg *config.Config, c *Collection, tag string, page int, includeFuture bool) (*[]PublicPost, error) {
+	return db.getPostsTagged(cfg, c, tag, page, includeFuture, true)
+}
+
+func (db *datastore) getPostsTagged(cfg *config.Config, c *Collection, tag string, page int, includeFuture bool, forListing bool) (*[]PublicPost, error) {
 	collID := c.ID
 
 	cf := c.NewFormat()
@@ -1485,10 +1519,16 @@ func (db *datastore) GetPostsTagged(cfg *config.Config, c *Collection, tag strin
 			log.Error("Failed scanning row: %v", err)
 			break
 		}
-		p.Content = truncateAtMore(p.Content)
+		wasTruncated := forListing && strings.Contains(p.Content, shortCodeMore)
+		if wasTruncated {
+			p.Content = truncateAtMore(p.Content)
+		}
 		p.extractData()
 		p.augmentContent(c)
 		p.formatContent(cfg, c, includeFuture, false)
+		if wasTruncated {
+			p.HTMLExcerpt = p.HTMLContent
+		}
 
 		posts = append(posts, p.processPost())
 	}
@@ -1554,10 +1594,17 @@ ORDER BY created `+order+limitStr, collID, lang)
 			log.Error("Failed scanning row: %v", err)
 			break
 		}
-		p.Content = truncateAtMore(p.Content)
+		// Lang-filtered listing pages are web-only surfaces; always truncate.
+		wasTruncated := strings.Contains(p.Content, shortCodeMore)
+		if wasTruncated {
+			p.Content = truncateAtMore(p.Content)
+		}
 		p.extractData()
 		p.augmentContent(c)
 		p.formatContent(cfg, c, includeFuture, false)
+		if wasTruncated {
+			p.HTMLExcerpt = p.HTMLContent
+		}
 
 		posts = append(posts, p.processPost())
 	}

@@ -65,9 +65,11 @@ type Store interface {
 	GetPost(userID int64, postID string) (PostRef, error)
 
 	// ListPosts returns the userID's posts, newest first, up to limit
-	// (limit <= 0 means a sensible default). Content is included only when
-	// includeContent is true.
-	ListPosts(userID int64, limit int, includeContent bool) ([]PostRef, error)
+	// (limit <= 0 means a sensible default). When collAlias is non-empty,
+	// only posts in that collection are returned — filtering happens before
+	// the limit is applied. Content is included only when includeContent is
+	// true.
+	ListPosts(userID int64, collAlias string, limit int, includeContent bool) ([]PostRef, error)
 
 	// ListCollections returns the collections owned by userID.
 	ListCollections(userID int64) ([]CollRef, error)

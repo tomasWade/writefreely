@@ -115,10 +115,16 @@ func (app *App) FetchPublicPosts() (interface{}, error) {
 			c.Monetization = app.db.GetCollectionAttribute(c.ID, "monetization_pointer")
 		}
 
+		truncated := strings.Contains(p.Content, shortCodeMore)
 		p.Content = truncateAtMore(p.Content)
 		p.extractData()
 		p.handlePremiumContent(c, false, false, app.cfg)
 		p.HTMLContent = template.HTML(applyMarkdown([]byte(p.Content), "", app.cfg))
+		if truncated {
+			// Reader templates render the excerpt with a "Read more..." link
+			// to the full post.
+			p.HTMLExcerpt = p.HTMLContent
+		}
 		fp := p.processPost()
 		if isCollectionPost {
 			fp.Collection = &CollectionObj{Collection: *c}
