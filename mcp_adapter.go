@@ -83,13 +83,17 @@ const moreTagSearchWindow = 2000
 // ensureMoreTag returns content with a <!--more--> excerpt marker if the
 // content is long and doesn't already carry one. The marker is placed on a
 // paragraph boundary shortly after the threshold so listings stay light.
-// Boundaries inside fenced code blocks (``` / ~~~) are skipped so the
-// marker never lands inside — and renders as visible text in — a code
-// block.
+// Fence state follows CommonMark closely enough for authoring (info-string
+// lines open, bare matching fences close, ``` and ~~~ don't close each
+// other) so the marker never lands inside a code block. If no safe
+// boundary exists past the threshold, no marker is inserted at all — a
+// slow listing beats corrupting the post.
 func ensureMoreTag(content string) string {
 	if strings.Contains(content, shortCodeMore) {
 		return content
 	}
+	// Normalize line endings so CRLF content still yields boundaries.
+	content = strings.ReplaceAll(content, "\r\n", "\n")
 	runes := []rune(content)
 	if len(runes) <= moreTagThreshold {
 		return content
@@ -97,47 +101,48 @@ func ensureMoreTag(content string) string {
 
 	// Collect paragraph boundaries (the first '\n' of a "\n\n" pair) that
 	// lie outside code fences, along with their rune offsets.
-	type boundary struct{ at int }
-	var boundaries []boundary
-	inFence := false
+	var boundaries []int
+	var fenceChar rune // 0 = not inside a fence
+	fenceLen := 0
 	lineStart := 0 // rune offset of the current line
-	for i := 0; i < len(runes); i++ {
-		if runes[i] != '\n' {
+	for i := 0; i <= len(runes); i++ {
+		if i < len(runes) && runes[i] != '\n' {
 			continue
 		}
 		line := strings.TrimSpace(string(runes[lineStart:i]))
-		if strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~") {
-			inFence = !inFence
-		}
-		// A boundary needs this line empty and the next line non-empty;
-		// i points at the '\n' ending an empty line when the previous
-		// character was also a newline.
-		if !inFence && lineStart == i && i > 0 && runes[i-1] == '\n' && i+1 < len(runes) && runes[i+1] != '\n' {
-			boundaries = append(boundaries, boundary{at: i - 1})
+		if fenceChar == 0 {
+			if strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~") {
+				fenceChar = rune(line[0])
+				fenceLen = strings.Count(line, string(line[0]))
+			} else if line == "" && lineStart == i && i > 0 && runes[i-1] == '\n' && i+1 < len(runes) && runes[i+1] != '\n' {
+				boundaries = append(boundaries, i-1)
+			}
+		} else {
+			// A closing fence is only the fence characters themselves, at
+			// least as long as the opener — no info string.
+			isClose := len(line) >= fenceLen && strings.Trim(line, string(fenceChar)) == ""
+			if isClose && rune(line[0]) == fenceChar {
+				fenceChar = 0
+			}
 		}
 		lineStart = i + 1
 	}
 
 	// Prefer a boundary shortly after the threshold...
-	for _, b := range boundaries {
-		if b.at >= moreTagThreshold && b.at < moreTagThreshold+moreTagSearchWindow {
-			return string(runes[:b.at]) + "\n\n<!--more-->\n\n" + string(runes[b.at+2:])
+	for _, at := range boundaries {
+		if at >= moreTagThreshold && at < moreTagThreshold+moreTagSearchWindow {
+			return string(runes[:at]) + "\n\n<!--more-->\n\n" + string(runes[at+2:])
 		}
 	}
-	// ...else the first boundary anywhere past the threshold...
-	for _, b := range boundaries {
-		if b.at >= moreTagThreshold {
-			return string(runes[:b.at]) + "\n\n<!--more-->\n\n" + string(runes[b.at+2:])
+	// ...else the first boundary anywhere past the threshold.
+	for _, at := range boundaries {
+		if at >= moreTagThreshold {
+			return string(runes[:at]) + "\n\n<!--more-->\n\n" + string(runes[at+2:])
 		}
 	}
-	// ...else force one at the window end. Fence-unfriendly content shapes
-	// may render the marker as text, but extremely long unbroken prose is
-	// pathological anyway.
-	at := moreTagThreshold + moreTagSearchWindow
-	if at >= len(runes) {
-		at = len(runes)
-	}
-	return string(runes[:at]) + "\n\n<!--more-->\n\n" + string(runes[at:])
+	// No safe boundary found (unbroken prose, or everything fenced):
+	// leave the post intact rather than risk mangling it.
+	return content
 }
 
 func (s *wfMCPStore) CreatePost(userID int64, title, content, collAlias string) (wfmcp.PostRef, error) {

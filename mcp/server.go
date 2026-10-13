@@ -66,7 +66,9 @@ func registerTools(srv *server.MCPServer, store Store) {
 		mcp.NewTool("publish_post",
 			mcp.WithDescription("Publish a new Markdown post to your WriteFreely blog. "+
 				"Returns the post's id, slug and canonical URL. "+
-				"The post's visibility follows the collection's settings."),
+				"The post's visibility follows the collection's settings. "+
+				"Posts longer than ~1000 characters automatically get a <!--more--> excerpt marker, "+
+				"so listings and the Reader show an excerpt with a link to the full post."),
 			mcp.WithString("title", mcp.Description("Post title; may be empty for untitled posts")),
 			mcp.WithString("content", mcp.Description("Full post body in Markdown"),
 				mcp.Required()),
@@ -79,7 +81,8 @@ func registerTools(srv *server.MCPServer, store Store) {
 	srv.AddTool(
 		mcp.NewTool("edit_post",
 			mcp.WithDescription("Edit an existing post you own. Only the fields you pass are changed; "+
-				"pass an empty string to clear the title."),
+				"pass an empty string to clear the title. "+
+				"Note: resubmitting long content re-applies the automatic <!--more--> excerpt marker."),
 			mcp.WithString("post_id", mcp.Description("ID of the post to edit"), mcp.Required()),
 			mcp.WithString("title", mcp.Description("New title; empty string clears it")),
 			mcp.WithString("content", mcp.Description("New full Markdown body")),

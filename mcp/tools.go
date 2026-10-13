@@ -125,9 +125,10 @@ func handleListMyPosts(store Store) func(context.Context, mcp.CallToolRequest) (
 			return errRes, nil
 		}
 		limit := defaultListLimit
-		if v, ok := req.GetArguments()["limit"].(float64); ok && v > 0 {
+		if v, ok := req.GetArguments()["limit"].(float64); ok && v >= 1 {
 			// Clamp on the float before converting: absurd values would
-			// wrap to a negative int and bypass the limit entirely.
+			// wrap to a negative int and bypass the limit entirely, while
+			// 0 < v < 1 would convert to 0 and mean "unbounded".
 			if v > float64(maxListLimit) {
 				v = float64(maxListLimit)
 			}

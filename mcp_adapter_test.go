@@ -69,11 +69,63 @@ func TestEnsureMoreTagInsertsOnParagraphBoundary(t *testing.T) {
 }
 
 func TestEnsureMoreTagLongUnbrokenContent(t *testing.T) {
-	// No paragraph breaks at all: still gets a marker without panicking.
+	// No paragraph breaks at all: no safe boundary, so no marker —
+	// leaving the post intact beats corrupting it.
 	in := strings.Repeat("字", moreTagThreshold*3)
+	if got := ensureMoreTag(in); got != in {
+		t.Errorf("unbroken content must be left alone, got marker inserted")
+	}
+}
+
+func TestEnsureMoreTagCRLF(t *testing.T) {
+	// CRLF paragraph separators must still yield boundaries (line endings
+	// are normalized to LF in the process, which is markdown-equivalent).
+	var b strings.Builder
+	for i := 0; i < 120; i++ {
+		b.WriteString("段落内容测试。\r\n\r\n")
+	}
+	in := b.String()
 	got := ensureMoreTag(in)
 	if !strings.Contains(got, "<!--more-->") {
-		t.Errorf("no marker inserted for unbroken long content")
+		t.Fatalf("no marker inserted for CRLF content")
+	}
+	if !strings.Contains(got, "段落内容测试。") {
+		t.Errorf("content mangled for CRLF input")
+	}
+}
+
+func TestEnsureMoreTagFenceDesyncSafety(t *testing.T) {
+	// A markdown tutorial: an outer fence whose body contains ```go lines
+	// (which must NOT close the outer fence per CommonMark, since closing
+	// fences carry no info string). The marker must land on the first safe
+	// boundary after the outer fence closes — outside every fence.
+	var b strings.Builder
+	for utf8.RuneCountInString(b.String()) < moreTagThreshold-10 {
+		b.WriteString("教程正文段落。\n\n")
+	}
+	in := b.String() +
+		"```\n内层示例：\n\n```go\nfunc inner() {}\n```\n\n继续内层文字。\n\n" +
+		strings.Repeat("外层内容行\n", 3000) +
+		"```\n\n结尾段落。\n\n"
+
+	got := ensureMoreTag(in)
+	idx := strings.Index(got, "<!--more-->")
+	if idx == -1 {
+		t.Fatalf("no marker inserted although a safe boundary exists")
+	}
+	// The marker sits right after the outer fence closes (the first safe
+	// boundary past the threshold), with the inner-text paragraph after
+	// it — never between the fence's opening and its closing line.
+	if !strings.HasSuffix(strings.TrimSpace(got[:idx]), "```") {
+		t.Errorf("marker not placed after the closing fence: [%.200s] MARKER", got[max(0,idx-200):idx])
+	}
+	if !strings.HasPrefix(got[idx:], "<!--more-->\n\n继续内层文字") {
+		t.Errorf("inner text not preserved after the marker: [%.100s]", got[idx:idx+100])
+	}
+	// The inner ```go line must not have closed the outer fence early:
+	// the long wall of text after the marker is still there.
+	if !strings.Contains(got[idx:], "外层内容行") {
+		t.Errorf("content after the marker was lost")
 	}
 }
 
