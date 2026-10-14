@@ -134,14 +134,22 @@ func ensureMoreTag(content string) string {
 			return string(runes[:at]) + "\n\n<!--more-->\n\n" + string(runes[at+2:])
 		}
 	}
-	// ...else the first boundary anywhere past the threshold.
+	// ...else the first boundary anywhere past the threshold...
 	for _, at := range boundaries {
 		if at >= moreTagThreshold {
 			return string(runes[:at]) + "\n\n<!--more-->\n\n" + string(runes[at+2:])
 		}
 	}
-	// No safe boundary found (unbroken prose, or everything fenced):
-	// leave the post intact rather than risk mangling it.
+	// ...else the last boundary before the threshold. Table-heavy posts
+	// have no blank lines past this point (one giant table), so the marker
+	// goes right before the table — the title serves as the listing
+	// summary. boundaries are collected in ascending order.
+	if len(boundaries) > 0 && boundaries[len(boundaries)-1] < moreTagThreshold {
+		at := boundaries[len(boundaries)-1]
+		return string(runes[:at]) + "\n\n<!--more-->\n\n" + string(runes[at+2:])
+	}
+	// No safe boundary found anywhere (unbroken prose, or everything
+	// fenced): leave the post intact rather than risk mangling it.
 	return content
 }
 

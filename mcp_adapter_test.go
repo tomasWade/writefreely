@@ -129,6 +129,30 @@ func TestEnsureMoreTagFenceDesyncSafety(t *testing.T) {
 	}
 }
 
+func TestEnsureMoreTagTableHeavy(t *testing.T) {
+	// A short intro followed by one giant table with no blank lines
+	// between rows: no boundary exists past the threshold, so the marker
+	// falls back to just before the table (title serves as the summary).
+	var b strings.Builder
+	b.WriteString("简短介绍。\n\n")
+	for i := 0; i < 120; i++ {
+		b.WriteString("| col1 | col2 |\n")
+	}
+	in := "前导段落。\n\n" + b.String() + "| done |\n"
+
+	got := ensureMoreTag(in)
+	idx := strings.Index(got, "<!--more-->")
+	if idx == -1 {
+		t.Fatalf("no marker inserted for table-heavy content")
+	}
+	if !strings.HasPrefix(got, "前导段落。\n\n简短介绍。") {
+		t.Errorf("marker not placed after the pre-table prose:\n%.120s", got[:idx])
+	}
+	if !strings.HasPrefix(got[idx:], "<!--more-->\n\n| col1 |") {
+		t.Errorf("content after marker is not the table:\n%.80s", got[idx:idx+80])
+	}
+}
+
 func TestEnsureMoreTagSkipsCodeFences(t *testing.T) {
 	// Prose up to just under the threshold, then one huge fenced block
 	// covering the whole search window: the marker must land on a prose
